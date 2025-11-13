@@ -37,10 +37,12 @@
 #include "ass_file.h"
 #include "ass_style.h"
 #include "compat.h"
+#include "dialog_export_cinecanvas.h"
 #include "options.h"
 
 #include <libaegisub/ass/time.h>
 #include <libaegisub/color.h>
+#include <libaegisub/fs.h>
 
 #include <wx/xml/xml.h>
 
@@ -77,6 +79,21 @@ void CineCanvasSubtitleFormat::ReadFile(AssFile *target, agi::fs::path const& fi
 
 void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const& filename,
                                          agi::vfr::Framerate const& fps, const char *encoding) const {
+	// Load export settings and show configuration dialog
+	CineCanvasExportSettings settings("Subtitle Format/CineCanvas");
+
+	// Show export dialog - if user cancels, abort export
+	if (ShowCineCanvasExportDialog(nullptr, settings, src) != wxID_OK)
+		return;
+
+	// Save user's settings for next time
+	settings.Save();
+
+	// Use the framerate from settings if provided, otherwise use the passed fps
+	agi::vfr::Framerate export_fps = settings.GetFramerate();
+	if (!export_fps.IsLoaded() && fps.IsLoaded())
+		export_fps = fps;
+
 	// Convert to CineCanvas-compatible format
 	AssFile copy(*src);
 	ConvertToCineCanvas(copy);
@@ -88,13 +105,12 @@ void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const
 	doc.SetRoot(root);
 
 	// Write header (metadata and font definitions)
-	WriteHeader(root, src);
+	WriteHeader(root, src, settings);
 
-	// Create Font container node
-	// For now, use a default font configuration
+	// Create Font container node using settings
 	wxXmlNode *fontNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Font");
 	fontNode->AddAttribute("Id", "Font1");
-	fontNode->AddAttribute("Size", "42");
+	fontNode->AddAttribute("Size", wxString::Format("%d", settings.font_size));
 	fontNode->AddAttribute("Weight", "normal");
 	fontNode->AddAttribute("Color", "FFFFFFFF");
 	fontNode->AddAttribute("Effect", "border");
@@ -105,7 +121,7 @@ void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const
 	int spotNumber = 1;
 	for (auto const& line : copy.Events) {
 		if (!line.Comment) {
-			WriteSubtitle(fontNode, &line, spotNumber++, fps);
+			WriteSubtitle(fontNode, &line, spotNumber++, export_fps, settings);
 		}
 	}
 
@@ -123,7 +139,7 @@ void CineCanvasSubtitleFormat::ConvertToCineCanvas(AssFile &file) const {
 	ConvertNewlines(file, "\\N", false);
 }
 
-void CineCanvasSubtitleFormat::WriteHeader(wxXmlNode *root, const AssFile *src) const {
+void CineCanvasSubtitleFormat::WriteHeader(wxXmlNode *root, const AssFile *src, const CineCanvasExportSettings &settings) const {
 	// SubtitleID with UUID
 	wxXmlNode *subIdNode = new wxXmlNode(wxXML_ELEMENT_NODE, "SubtitleID");
 	root->AddChild(subIdNode);
@@ -132,27 +148,34 @@ void CineCanvasSubtitleFormat::WriteHeader(wxXmlNode *root, const AssFile *src) 
 	// MovieTitle
 	wxXmlNode *movieTitleNode = new wxXmlNode(wxXML_ELEMENT_NODE, "MovieTitle");
 	root->AddChild(movieTitleNode);
-	movieTitleNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", "Untitled"));
+	movieTitleNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", to_wx(settings.movie_title)));
 
 	// ReelNumber
 	wxXmlNode *reelNode = new wxXmlNode(wxXML_ELEMENT_NODE, "ReelNumber");
 	root->AddChild(reelNode);
-	reelNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", "1"));
+	reelNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", wxString::Format("%d", settings.reel_number)));
 
 	// Language
 	wxXmlNode *langNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Language");
 	root->AddChild(langNode);
-	langNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", "en"));
+	langNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", to_wx(settings.language_code)));
 
-	// LoadFont (placeholder - will be enhanced in later phases)
+	// LoadFont
 	wxXmlNode *loadFontNode = new wxXmlNode(wxXML_ELEMENT_NODE, "LoadFont");
 	loadFontNode->AddAttribute("Id", "Font1");
-	loadFontNode->AddAttribute("URI", "");
+	if (settings.include_font_reference && !settings.font_uri.empty()) {
+		// Use just the filename from the path
+		agi::fs::path font_path(settings.font_uri);
+		loadFontNode->AddAttribute("URI", to_wx(font_path.filename().string()));
+	} else {
+		loadFontNode->AddAttribute("URI", "");
+	}
 	root->AddChild(loadFontNode);
 }
 
 void CineCanvasSubtitleFormat::WriteSubtitle(wxXmlNode *fontNode, const AssDialogue *line,
-                                             int spotNumber, const agi::vfr::Framerate &fps) const {
+                                             int spotNumber, const agi::vfr::Framerate &fps,
+                                             const CineCanvasExportSettings &settings) const {
 	// Create Subtitle element
 	wxXmlNode *subtitleNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Subtitle");
 	subtitleNode->AddAttribute("SpotNumber", wxString::Format("%d", spotNumber));
@@ -164,11 +187,9 @@ void CineCanvasSubtitleFormat::WriteSubtitle(wxXmlNode *fontNode, const AssDialo
 	subtitleNode->AddAttribute("TimeIn", to_wx(timeIn));
 	subtitleNode->AddAttribute("TimeOut", to_wx(timeOut));
 
-	// Calculate and set fade times
-	int fadeUpTime = GetFadeTime(line, true);
-	int fadeDownTime = GetFadeTime(line, false);
-	subtitleNode->AddAttribute("FadeUpTime", wxString::Format("%d", fadeUpTime));
-	subtitleNode->AddAttribute("FadeDownTime", wxString::Format("%d", fadeDownTime));
+	// Use fade duration from settings
+	subtitleNode->AddAttribute("FadeUpTime", wxString::Format("%d", settings.fade_duration));
+	subtitleNode->AddAttribute("FadeDownTime", wxString::Format("%d", settings.fade_duration));
 
 	fontNode->AddChild(subtitleNode);
 
