@@ -465,3 +465,165 @@ TEST_F(CineCanvasTimingTest, NoDriftOver1000Subtitles) {
 	std::string result1000 = format.ConvertTimeToCineCanvas(agi::Time(999 * 3000), fps);
 	EXPECT_EQ("00:49:57:000", result1000);
 }
+
+// ==================== Configuration Validation Tests ====================
+
+#include "../../src/cinecanvas_config.h"
+
+class CineCanvasConfigTest : public ::testing::Test {
+};
+
+// Test frame rate validation
+TEST_F(CineCanvasConfigTest, ValidFrameRates) {
+	// Valid frame rates should pass through unchanged
+	EXPECT_EQ(24, CineCanvasConfig::ValidateFrameRate(24));
+	EXPECT_EQ(25, CineCanvasConfig::ValidateFrameRate(25));
+	EXPECT_EQ(30, CineCanvasConfig::ValidateFrameRate(30));
+}
+
+TEST_F(CineCanvasConfigTest, InvalidFrameRates) {
+	// Invalid frame rates should fall back to default (24)
+	EXPECT_EQ(24, CineCanvasConfig::ValidateFrameRate(0));
+	EXPECT_EQ(24, CineCanvasConfig::ValidateFrameRate(-1));
+	EXPECT_EQ(24, CineCanvasConfig::ValidateFrameRate(23));
+	EXPECT_EQ(24, CineCanvasConfig::ValidateFrameRate(26));
+	EXPECT_EQ(24, CineCanvasConfig::ValidateFrameRate(29));
+	EXPECT_EQ(24, CineCanvasConfig::ValidateFrameRate(31));
+	EXPECT_EQ(24, CineCanvasConfig::ValidateFrameRate(60));
+	EXPECT_EQ(24, CineCanvasConfig::ValidateFrameRate(999));
+}
+
+// Test movie title validation
+TEST_F(CineCanvasConfigTest, ValidMovieTitles) {
+	// Valid titles should pass through unchanged
+	EXPECT_EQ("My Movie", CineCanvasConfig::ValidateMovieTitle("My Movie"));
+	EXPECT_EQ("Test 123", CineCanvasConfig::ValidateMovieTitle("Test 123"));
+	EXPECT_EQ("A", CineCanvasConfig::ValidateMovieTitle("A"));
+}
+
+TEST_F(CineCanvasConfigTest, InvalidMovieTitles) {
+	// Empty or whitespace-only titles should fall back to default
+	EXPECT_EQ("Untitled", CineCanvasConfig::ValidateMovieTitle(""));
+	EXPECT_EQ("Untitled", CineCanvasConfig::ValidateMovieTitle("   "));
+	EXPECT_EQ("Untitled", CineCanvasConfig::ValidateMovieTitle("\t\n"));
+}
+
+TEST_F(CineCanvasConfigTest, MovieTitleTrimming) {
+	// Leading/trailing whitespace should be removed
+	EXPECT_EQ("My Movie", CineCanvasConfig::ValidateMovieTitle("  My Movie  "));
+	EXPECT_EQ("My Movie", CineCanvasConfig::ValidateMovieTitle("\tMy Movie\n"));
+}
+
+// Test reel number validation
+TEST_F(CineCanvasConfigTest, ValidReelNumbers) {
+	// Valid reel numbers should pass through unchanged
+	EXPECT_EQ(1, CineCanvasConfig::ValidateReelNumber(1));
+	EXPECT_EQ(2, CineCanvasConfig::ValidateReelNumber(2));
+	EXPECT_EQ(10, CineCanvasConfig::ValidateReelNumber(10));
+	EXPECT_EQ(999, CineCanvasConfig::ValidateReelNumber(999));
+}
+
+TEST_F(CineCanvasConfigTest, InvalidReelNumbers) {
+	// Invalid reel numbers should fall back to default (1)
+	EXPECT_EQ(1, CineCanvasConfig::ValidateReelNumber(0));
+	EXPECT_EQ(1, CineCanvasConfig::ValidateReelNumber(-1));
+	EXPECT_EQ(1, CineCanvasConfig::ValidateReelNumber(-999));
+}
+
+// Test language code validation
+TEST_F(CineCanvasConfigTest, ValidLanguageCodes) {
+	// Common 2-letter codes
+	EXPECT_EQ("en", CineCanvasConfig::ValidateLanguageCode("en"));
+	EXPECT_EQ("fr", CineCanvasConfig::ValidateLanguageCode("fr"));
+	EXPECT_EQ("de", CineCanvasConfig::ValidateLanguageCode("de"));
+	EXPECT_EQ("es", CineCanvasConfig::ValidateLanguageCode("es"));
+	EXPECT_EQ("ja", CineCanvasConfig::ValidateLanguageCode("ja"));
+
+	// 3-letter ISO 639-2 codes
+	EXPECT_EQ("eng", CineCanvasConfig::ValidateLanguageCode("eng"));
+	EXPECT_EQ("fra", CineCanvasConfig::ValidateLanguageCode("fra"));
+	EXPECT_EQ("deu", CineCanvasConfig::ValidateLanguageCode("deu"));
+}
+
+TEST_F(CineCanvasConfigTest, LanguageCodeCaseInsensitive) {
+	// Language codes should be converted to lowercase
+	EXPECT_EQ("en", CineCanvasConfig::ValidateLanguageCode("EN"));
+	EXPECT_EQ("en", CineCanvasConfig::ValidateLanguageCode("En"));
+	EXPECT_EQ("eng", CineCanvasConfig::ValidateLanguageCode("ENG"));
+}
+
+TEST_F(CineCanvasConfigTest, InvalidLanguageCodes) {
+	// Invalid codes should fall back to default (en)
+	EXPECT_EQ("en", CineCanvasConfig::ValidateLanguageCode(""));
+	EXPECT_EQ("en", CineCanvasConfig::ValidateLanguageCode("a")); // Too short
+	EXPECT_EQ("en", CineCanvasConfig::ValidateLanguageCode("abcd")); // Too long
+	EXPECT_EQ("en", CineCanvasConfig::ValidateLanguageCode("e1")); // Contains digit
+	EXPECT_EQ("en", CineCanvasConfig::ValidateLanguageCode("e-")); // Contains special char
+}
+
+TEST_F(CineCanvasConfigTest, LanguageCodeValidation) {
+	// Test IsValidLanguageCode function
+	EXPECT_TRUE(CineCanvasConfig::IsValidLanguageCode("en"));
+	EXPECT_TRUE(CineCanvasConfig::IsValidLanguageCode("eng"));
+	EXPECT_TRUE(CineCanvasConfig::IsValidLanguageCode("fr"));
+	EXPECT_TRUE(CineCanvasConfig::IsValidLanguageCode("fra"));
+
+	EXPECT_FALSE(CineCanvasConfig::IsValidLanguageCode(""));
+	EXPECT_FALSE(CineCanvasConfig::IsValidLanguageCode("a"));
+	EXPECT_FALSE(CineCanvasConfig::IsValidLanguageCode("abcd"));
+	EXPECT_FALSE(CineCanvasConfig::IsValidLanguageCode("e1"));
+	EXPECT_FALSE(CineCanvasConfig::IsValidLanguageCode("123"));
+}
+
+// Test font size validation
+TEST_F(CineCanvasConfigTest, ValidFontSizes) {
+	// Valid font sizes should pass through unchanged
+	EXPECT_EQ(10, CineCanvasConfig::ValidateFontSize(10)); // Minimum
+	EXPECT_EQ(42, CineCanvasConfig::ValidateFontSize(42)); // Default
+	EXPECT_EQ(48, CineCanvasConfig::ValidateFontSize(48)); // Common cinema size
+	EXPECT_EQ(72, CineCanvasConfig::ValidateFontSize(72)); // Maximum
+}
+
+TEST_F(CineCanvasConfigTest, InvalidFontSizes) {
+	// Invalid font sizes should fall back to default (42)
+	EXPECT_EQ(42, CineCanvasConfig::ValidateFontSize(0));
+	EXPECT_EQ(42, CineCanvasConfig::ValidateFontSize(9)); // Below minimum
+	EXPECT_EQ(42, CineCanvasConfig::ValidateFontSize(73)); // Above maximum
+	EXPECT_EQ(42, CineCanvasConfig::ValidateFontSize(-1));
+	EXPECT_EQ(42, CineCanvasConfig::ValidateFontSize(999));
+}
+
+// Test fade duration validation
+TEST_F(CineCanvasConfigTest, ValidFadeDurations) {
+	// Valid fade durations should pass through unchanged
+	EXPECT_EQ(0, CineCanvasConfig::ValidateFadeDuration(0)); // Minimum
+	EXPECT_EQ(20, CineCanvasConfig::ValidateFadeDuration(20)); // Default
+	EXPECT_EQ(100, CineCanvasConfig::ValidateFadeDuration(100));
+	EXPECT_EQ(1000, CineCanvasConfig::ValidateFadeDuration(1000));
+}
+
+TEST_F(CineCanvasConfigTest, InvalidFadeDurations) {
+	// Negative fade durations should fall back to default (20)
+	EXPECT_EQ(20, CineCanvasConfig::ValidateFadeDuration(-1));
+	EXPECT_EQ(20, CineCanvasConfig::ValidateFadeDuration(-100));
+}
+
+// Test default constants
+TEST_F(CineCanvasConfigTest, DefaultValues) {
+	EXPECT_EQ(24, CineCanvasConfig::DEFAULT_FRAME_RATE);
+	EXPECT_EQ("Untitled", CineCanvasConfig::DEFAULT_MOVIE_TITLE);
+	EXPECT_EQ(1, CineCanvasConfig::DEFAULT_REEL_NUMBER);
+	EXPECT_EQ("en", CineCanvasConfig::DEFAULT_LANGUAGE_CODE);
+	EXPECT_EQ(42, CineCanvasConfig::DEFAULT_FONT_SIZE);
+	EXPECT_EQ(20, CineCanvasConfig::DEFAULT_FADE_DURATION);
+	EXPECT_EQ(false, CineCanvasConfig::DEFAULT_INCLUDE_FONT_REFERENCE);
+}
+
+// Test supported frame rates list
+TEST_F(CineCanvasConfigTest, SupportedFrameRates) {
+	auto rates = CineCanvasConfig::SUPPORTED_FRAME_RATES;
+	EXPECT_EQ(3u, rates.size());
+	EXPECT_TRUE(std::find(rates.begin(), rates.end(), 24) != rates.end());
+	EXPECT_TRUE(std::find(rates.begin(), rates.end(), 25) != rates.end());
+	EXPECT_TRUE(std::find(rates.begin(), rates.end(), 30) != rates.end());
+}
