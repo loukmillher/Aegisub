@@ -122,6 +122,31 @@ void General_DefaultStyles(wxTreebook *book, Preferences *parent) {
 	p->SetSizerAndFit(p->sizer);
 }
 
+void General_CineCanvasExport(wxTreebook *book, Preferences *parent) {
+	auto p = new OptionPage(book, parent, _("CineCanvas Export"), OptionPage::PAGE_SUB);
+
+	auto dcp_metadata = p->PageSizer(_("DCP Metadata Defaults"));
+	p->OptionAdd(dcp_metadata, _("Movie Title"), "Subtitle Format/CineCanvas/Movie Title");
+	p->OptionAdd(dcp_metadata, _("Reel Number"), "Subtitle Format/CineCanvas/Reel Number", 1, 99);
+	p->OptionAdd(dcp_metadata, _("Language Code (ISO 639-2)"), "Subtitle Format/CineCanvas/Language Code");
+
+	auto timing = p->PageSizer(_("Timing"));
+	p->OptionAdd(timing, _("Default Frame Rate"), "Subtitle Format/CineCanvas/Default Frame Rate", 1, 120);
+	p->OptionAdd(timing, _("Fade Duration (ms)"), "Subtitle Format/CineCanvas/Fade Duration", 0, 1000);
+
+	auto typography = p->PageSizer(_("Typography"));
+	p->OptionAdd(typography, _("Default Font Size (pt)"), "Subtitle Format/CineCanvas/Default Font Size", 20, 100);
+	p->OptionAdd(typography, _("Include Font Reference"), "Subtitle Format/CineCanvas/Include Font Reference");
+
+	auto help_text = new wxStaticText(p, wxID_ANY,
+		_("These are default values for CineCanvas XML export. You can override them when exporting.\n\n"
+		  "CineCanvas XML is used for Digital Cinema Package (DCP) subtitles following the Interop DCP specification."));
+	help_text->Wrap(400);
+	p->sizer->Add(help_text, wxSizerFlags().Border(wxTOP, 16));
+
+	p->SetSizerAndFit(p->sizer);
+}
+
 /// Audio preferences page
 void Audio(wxTreebook *book, Preferences *parent) {
 	auto p = new OptionPage(book, parent, _("Audio"));
@@ -724,6 +749,7 @@ Preferences::Preferences(wxWindow *parent): wxDialog(parent, -1, _("Preferences"
 	book = new wxTreebook(this, -1, wxDefaultPosition, wxDefaultSize);
 	General(book, this);
 	General_DefaultStyles(book, this);
+	General_CineCanvasExport(book, this);
 	Audio(book, this);
 	Video(book, this);
 	Interface(book, this);

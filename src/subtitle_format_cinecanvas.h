@@ -38,6 +38,7 @@
 
 class AssDialogue;
 class AssStyle;
+class CineCanvasExportSettings;
 namespace agi { struct Color; }
 class wxXmlNode;
 
@@ -50,15 +51,18 @@ class CineCanvasSubtitleFormat final : public SubtitleFormat {
 	/// Write XML document header and metadata
 	/// @param root Root XML node
 	/// @param src Source subtitle file
-	void WriteHeader(wxXmlNode *root, const AssFile *src) const;
+	/// @param settings Export settings
+	void WriteHeader(wxXmlNode *root, const AssFile *src, const CineCanvasExportSettings &settings) const;
 
 	/// Write a single subtitle entry
 	/// @param fontNode Parent font node
 	/// @param line Dialogue line to write
 	/// @param spotNumber Sequential subtitle number
 	/// @param fps Frame rate for timing conversion
+	/// @param settings Export settings
 	void WriteSubtitle(wxXmlNode *fontNode, const AssDialogue *line,
-	                   int spotNumber, const agi::vfr::Framerate &fps) const;
+	                   int spotNumber, const agi::vfr::Framerate &fps,
+	                   const CineCanvasExportSettings &settings) const;
 
 	/// Generate RFC 4122 compliant UUID
 	/// @return UUID string in urn:uuid:xxx format

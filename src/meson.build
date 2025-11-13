@@ -62,6 +62,7 @@ aegisub_src = files(
     'dialog_detached_video.cpp',
     'dialog_dummy_video.cpp',
     'dialog_export.cpp',
+    'dialog_export_cinecanvas.cpp',
     'dialog_export_ebu3264.cpp',
     'dialog_fonts_collector.cpp',
     'dialog_jumpto.cpp',
