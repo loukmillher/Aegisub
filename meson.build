@@ -165,7 +165,7 @@ else
 
     opt_var = cmake.subproject_options()
     opt_var.set_override_option('cpp_std', 'c++20')
-    opt_var.add_cmake_defines({
+    wx_cmake_defines = {
         'CMAKE_POLICY_VERSION_MINIMUM': '3.31',
 
         'wxBUILD_INSTALL': false,
@@ -176,7 +176,12 @@ else
         'CMAKE_BUILD_TYPE': build_type,
         'wxUSE_IMAGE': true,
         'wxBUILD_MONOLITHIC': true      # otherwise breaks project generation w/ meson
-    })
+    }
+    # Disable Intel SSE optimizations on ARM64 (macOS Apple Silicon)
+    if host_machine.system() == 'darwin' and host_machine.cpu_family() == 'aarch64'
+        wx_cmake_defines += {'PNG_INTEL_SSE': 'off'}
+    endif
+    opt_var.add_cmake_defines(wx_cmake_defines)
 
     wx = cmake.subproject('wxWidgets', options: opt_var)
 

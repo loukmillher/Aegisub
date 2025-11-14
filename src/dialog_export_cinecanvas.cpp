@@ -110,6 +110,8 @@ namespace {
 		CineCanvasExportSettings &settings;
 		const AssFile *file;
 		wxStaticText *warning_text;
+		wxTextCtrl *movie_title_ctrl;
+		wxFilePickerCtrl *font_uri_ctrl;
 
 		void UpdateWarnings() {
 			std::string warnings = settings.Validate(file);
@@ -145,7 +147,7 @@ namespace {
 				wxDefaultPosition, wxDefaultSize, 9, frame_rates, wxCB_DROPDOWN | wxCB_READONLY);
 
 			// Movie Title
-			wxTextCtrl *movie_title_ctrl = new wxTextCtrl(this, -1, "", wxDefaultPosition, wxSize(300, -1));
+			movie_title_ctrl = new wxTextCtrl(this, -1, "", wxDefaultPosition, wxSize(300, -1));
 
 			// Reel Number
 			wxSpinCtrl *reel_number_ctrl = new wxSpinCtrl(this, -1, "1",
@@ -164,7 +166,7 @@ namespace {
 
 			// Font Reference
 			wxCheckBox *include_font_check = new wxCheckBox(this, -1, _("Include font reference"));
-			wxFilePickerCtrl *font_uri_ctrl = new wxFilePickerCtrl(this, -1, "",
+			font_uri_ctrl = new wxFilePickerCtrl(this, -1, "",
 				_("Select font file"), "TrueType Font (*.ttf)|*.ttf|OpenType Font (*.otf)|*.otf",
 				wxDefaultPosition, wxDefaultSize, wxFLP_OPEN | wxFLP_FILE_MUST_EXIST | wxFLP_USE_TEXTCTRL);
 
@@ -252,13 +254,17 @@ namespace {
 
 			// Set up validators
 			frame_rate_ctrl->SetValidator(wxGenericValidator((int*)&settings.frame_rate));
-			movie_title_ctrl->SetValidator(wxGenericValidator(&settings.movie_title));
+			// Note: wxGenericValidator doesn't work with std::string, set initial values manually
+			movie_title_ctrl->SetValue(to_wx(settings.movie_title));
 			reel_number_ctrl->SetValidator(wxGenericValidator(&settings.reel_number));
 			language_code_ctrl->SetValidator(LanguageCodeValidator(&settings.language_code));
 			font_size_ctrl->SetValidator(wxGenericValidator(&settings.font_size));
 			fade_duration_ctrl->SetValidator(wxGenericValidator(&settings.fade_duration));
 			include_font_check->SetValidator(wxGenericValidator(&settings.include_font_reference));
-			font_uri_ctrl->SetValidator(wxGenericValidator(&settings.font_uri));
+			// Note: wxGenericValidator doesn't work with std::string, set initial value manually
+			if (!settings.font_uri.empty()) {
+				font_uri_ctrl->SetPath(to_wx(settings.font_uri));
+			}
 
 			// Show initial warnings
 			Bind(wxEVT_INIT_DIALOG, [=](wxInitDialogEvent &e) {
@@ -269,6 +275,16 @@ namespace {
 			// Update warnings when settings change
 			frame_rate_ctrl->Bind(wxEVT_COMBOBOX, [=](wxCommandEvent &) { UpdateWarnings(); });
 			movie_title_ctrl->Bind(wxEVT_TEXT, [=](wxCommandEvent &) { UpdateWarnings(); });
+		}
+
+		bool TransferDataFromWindow() override {
+			if (!wxDialog::TransferDataFromWindow()) {
+				return false;
+			}
+			// Manually transfer string fields since wxGenericValidator doesn't work with std::string
+			settings.movie_title = from_wx(movie_title_ctrl->GetValue());
+			settings.font_uri = from_wx(font_uri_ctrl->GetPath());
+			return true;
 		}
 	};
 
@@ -396,8 +412,8 @@ std::string CineCanvasExportSettings::Validate(const AssFile *file) const {
 
 	// Generate warnings
 	if (subtitle_count > 500) {
-		warnings.push_back(fmt_wx(
-			_("Warning: File contains %d subtitles. DCP typically limits to ~500 per reel."),
+		warnings.push_back(agi::wxformat(
+			wxString(_("Warning: File contains %d subtitles. DCP typically limits to ~500 per reel.")),
 			static_cast<int>(subtitle_count)
 		));
 	}

@@ -40,6 +40,7 @@ class AssDialogue;
 class AssStyle;
 class CineCanvasExportSettings;
 namespace agi { struct Color; }
+namespace agi { class Time; }
 class wxXmlNode;
 
 /// @class CineCanvasSubtitleFormat
