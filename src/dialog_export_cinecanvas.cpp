@@ -37,7 +37,6 @@
 #include "ass_file.h"
 #include "compat.h"
 #include "format.h"
-#include "options.h"
 
 #include <libaegisub/fs.h>
 
@@ -143,7 +142,7 @@ namespace {
 				_("59.94 fps (HFR NTSC)"),
 				_("60 fps (HFR)")
 			};
-			wxComboBox *frame_rate_ctrl = new wxComboBox(this, -1, frame_rates[1],
+			wxComboBox *frame_rate_ctrl = new wxComboBox(this, -1, frame_rates[settings.frame_rate],
 				wxDefaultPosition, wxDefaultSize, 9, frame_rates, wxCB_DROPDOWN | wxCB_READONLY);
 
 			// Movie Title
@@ -155,14 +154,6 @@ namespace {
 
 			// Language Code
 			wxTextCtrl *language_code_ctrl = new wxTextCtrl(this, -1, "en", wxDefaultPosition, wxSize(60, -1));
-
-			// Font Size
-			wxSpinCtrl *font_size_ctrl = new wxSpinCtrl(this, -1, "42",
-				wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 20, 100);
-
-			// Fade Duration
-			wxSpinCtrl *fade_duration_ctrl = new wxSpinCtrl(this, -1, "20",
-				wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, 1000);
 
 			// Font Reference
 			wxCheckBox *include_font_check = new wxCheckBox(this, -1, _("Include font reference"));
@@ -202,25 +193,15 @@ namespace {
 			frame_rate_row->Add(frame_rate_ctrl, 1, wxEXPAND);
 			timing_sizer->Add(frame_rate_row, 0, wxEXPAND | (wxALL & ~wxTOP), 6);
 
-			auto fade_row = new wxBoxSizer(wxHORIZONTAL);
-			fade_row->Add(new wxStaticText(this, -1, _("Fade Duration (ms):")), 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 12);
-			fade_row->Add(fade_duration_ctrl, 0, 0, 0);
-			timing_sizer->Add(fade_row, 0, wxEXPAND | (wxALL & ~wxTOP), 6);
+			// Layout: Font section
+			auto font_sizer = new wxStaticBoxSizer(wxVERTICAL, this, _("Font"));
 
-			// Layout: Typography section
-			auto typography_sizer = new wxStaticBoxSizer(wxVERTICAL, this, _("Typography"));
-
-			auto font_size_row = new wxBoxSizer(wxHORIZONTAL);
-			font_size_row->Add(new wxStaticText(this, -1, _("Font Size (pt):")), 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 12);
-			font_size_row->Add(font_size_ctrl, 0, 0, 0);
-			typography_sizer->Add(font_size_row, 0, wxEXPAND | (wxALL & ~wxTOP), 6);
-
-			typography_sizer->Add(include_font_check, 0, wxEXPAND | (wxALL & ~wxTOP), 6);
+			font_sizer->Add(include_font_check, 0, wxEXPAND | (wxALL & ~wxTOP), 6);
 
 			auto font_uri_row = new wxBoxSizer(wxHORIZONTAL);
 			font_uri_row->Add(new wxStaticText(this, -1, _("Font File:")), 0, wxALIGN_CENTRE_VERTICAL | wxRIGHT, 12);
 			font_uri_row->Add(font_uri_ctrl, 1, wxEXPAND);
-			typography_sizer->Add(font_uri_row, 0, wxEXPAND | (wxALL & ~wxTOP), 6);
+			font_sizer->Add(font_uri_row, 0, wxEXPAND | (wxALL & ~wxTOP), 6);
 
 			// Layout: Left and Right columns
 			auto left_column = new wxBoxSizer(wxVERTICAL);
@@ -228,7 +209,7 @@ namespace {
 			left_column->Add(timing_sizer, 0, wxEXPAND, 0);
 
 			auto right_column = new wxBoxSizer(wxVERTICAL);
-			right_column->Add(typography_sizer, 0, wxEXPAND, 0);
+			right_column->Add(font_sizer, 0, wxEXPAND, 0);
 
 			auto columns_sizer = new wxBoxSizer(wxHORIZONTAL);
 			columns_sizer->Add(left_column, 1, wxRIGHT | wxEXPAND, 6);
@@ -241,7 +222,7 @@ namespace {
 			warning_text->Hide();
 
 			// Buttons
-			auto buttons_sizer = CreateStdDialogButtonSizer(wxOK | wxCANCEL | wxHELP);
+			auto buttons_sizer = CreateStdDialogButtonSizer(wxOK | wxCANCEL);
 
 			// Main layout
 			auto main_sizer = new wxBoxSizer(wxVERTICAL);
@@ -252,16 +233,12 @@ namespace {
 			SetSizerAndFit(main_sizer);
 			CenterOnParent();
 
-			// Set up validators
+			// Set up validators and initial values
 			frame_rate_ctrl->SetValidator(wxGenericValidator((int*)&settings.frame_rate));
-			// Note: wxGenericValidator doesn't work with std::string, set initial values manually
 			movie_title_ctrl->SetValue(to_wx(settings.movie_title));
 			reel_number_ctrl->SetValidator(wxGenericValidator(&settings.reel_number));
 			language_code_ctrl->SetValidator(LanguageCodeValidator(&settings.language_code));
-			font_size_ctrl->SetValidator(wxGenericValidator(&settings.font_size));
-			fade_duration_ctrl->SetValidator(wxGenericValidator(&settings.fade_duration));
 			include_font_check->SetValidator(wxGenericValidator(&settings.include_font_reference));
-			// Note: wxGenericValidator doesn't work with std::string, set initial value manually
 			if (!settings.font_uri.empty()) {
 				font_uri_ctrl->SetPath(to_wx(settings.font_uri));
 			}
@@ -310,60 +287,40 @@ agi::vfr::Framerate CineCanvasExportSettings::GetFramerate() const {
 	}
 }
 
-CineCanvasExportSettings::CineCanvasExportSettings(std::string const& prefix)
-: prefix(prefix)
-{
-	// Load settings from options with defaults
-	int fps_option = OPT_GET(prefix + "/Default Frame Rate")->GetInt();
+/// Map a framerate to the closest FrameRate enum value
+static CineCanvasExportSettings::FrameRate FramerateToEnum(agi::vfr::Framerate const& fps) {
+	if (!fps.IsLoaded()) return CineCanvasExportSettings::FPS_24;
 
-	// Map the old simple FPS value to the new enum
-	// Default was 24, so we map common values
-	switch (fps_option) {
-		case 23: frame_rate = FPS_23_976; break;
-		case 24: frame_rate = FPS_24; break;
-		case 25: frame_rate = FPS_25; break;
-		case 29: frame_rate = FPS_29_97; break;
-		case 30: frame_rate = FPS_30; break;
-		case 48: frame_rate = FPS_48; break;
-		case 50: frame_rate = FPS_50; break;
-		case 59: frame_rate = FPS_59_94; break;
-		case 60: frame_rate = FPS_60; break;
-		default: frame_rate = FPS_24; break;
-	}
+	double rate = fps.FPS();
 
-	movie_title = OPT_GET(prefix + "/Movie Title")->GetString();
-	reel_number = OPT_GET(prefix + "/Reel Number")->GetInt();
-	language_code = OPT_GET(prefix + "/Language Code")->GetString();
-	font_size = OPT_GET(prefix + "/Default Font Size")->GetInt();
-	fade_duration = OPT_GET(prefix + "/Fade Duration")->GetInt();
-	include_font_reference = OPT_GET(prefix + "/Include Font Reference")->GetBool();
+	// Check for common framerates with tolerance
+	if (std::abs(rate - 23.976) < 0.1) return CineCanvasExportSettings::FPS_23_976;
+	if (std::abs(rate - 24.0) < 0.1) return CineCanvasExportSettings::FPS_24;
+	if (std::abs(rate - 25.0) < 0.1) return CineCanvasExportSettings::FPS_25;
+	if (std::abs(rate - 29.97) < 0.1) return CineCanvasExportSettings::FPS_29_97;
+	if (std::abs(rate - 30.0) < 0.1) return CineCanvasExportSettings::FPS_30;
+	if (std::abs(rate - 48.0) < 0.1) return CineCanvasExportSettings::FPS_48;
+	if (std::abs(rate - 50.0) < 0.1) return CineCanvasExportSettings::FPS_50;
+	if (std::abs(rate - 59.94) < 0.1) return CineCanvasExportSettings::FPS_59_94;
+	if (std::abs(rate - 60.0) < 0.1) return CineCanvasExportSettings::FPS_60;
 
-	// Font URI is not in the original config, so we use an empty default
-	font_uri = "";
+	// Default to 24fps for unknown rates
+	return CineCanvasExportSettings::FPS_24;
 }
 
-void CineCanvasExportSettings::Save() const {
-	// Map enum back to simple FPS value for storage
-	int fps_value = 24;
-	switch (frame_rate) {
-		case FPS_23_976: fps_value = 23; break;
-		case FPS_24:     fps_value = 24; break;
-		case FPS_25:     fps_value = 25; break;
-		case FPS_29_97:  fps_value = 29; break;
-		case FPS_30:     fps_value = 30; break;
-		case FPS_48:     fps_value = 48; break;
-		case FPS_50:     fps_value = 50; break;
-		case FPS_59_94:  fps_value = 59; break;
-		case FPS_60:     fps_value = 60; break;
-	}
+CineCanvasExportSettings::CineCanvasExportSettings(agi::fs::path const& filename, agi::vfr::Framerate const& video_fps)
+{
+	// Derive movie title from filename (without extension)
+	movie_title = filename.stem().string();
 
-	OPT_SET(prefix + "/Default Frame Rate")->SetInt(fps_value);
-	OPT_SET(prefix + "/Movie Title")->SetString(movie_title);
-	OPT_SET(prefix + "/Reel Number")->SetInt(reel_number);
-	OPT_SET(prefix + "/Language Code")->SetString(language_code);
-	OPT_SET(prefix + "/Default Font Size")->SetInt(font_size);
-	OPT_SET(prefix + "/Fade Duration")->SetInt(fade_duration);
-	OPT_SET(prefix + "/Include Font Reference")->SetBool(include_font_reference);
+	// Use video framerate if available, otherwise default to 24fps
+	frame_rate = FramerateToEnum(video_fps);
+
+	// DCP-specific defaults (user should verify these)
+	reel_number = 1;
+	language_code = "en";
+	include_font_reference = false;
+	font_uri = "";
 }
 
 std::string CineCanvasExportSettings::Validate(const AssFile *file) const {

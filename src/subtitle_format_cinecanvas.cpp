@@ -38,7 +38,6 @@
 #include "ass_style.h"
 #include "compat.h"
 #include "dialog_export_cinecanvas.h"
-#include "options.h"
 
 #include <libaegisub/ass/time.h>
 #include <libaegisub/color.h>
@@ -52,8 +51,257 @@
 #include <boost/format.hpp>
 
 #include <algorithm>
+#include <map>
+#include <regex>
 
 DEFINE_EXCEPTION(CineCanvasParseError, SubtitleFormatParseError);
+
+/// Helper struct to hold font properties parsed from CineCanvas XML
+struct CineCanvasFontProps {
+	std::string fontName = "Arial";
+	int fontSize = 42;
+	bool bold = false;
+	bool italic = false;
+	agi::Color primaryColor{255, 255, 255};
+	agi::Color outlineColor{0, 0, 0};
+	double outlineWidth = 2.0;
+	uint8_t primaryAlpha = 0;  // ASS format: 0=opaque, 255=transparent
+	uint8_t outlineAlpha = 0;
+};
+
+/// Helper struct for a styled text segment
+struct StyledSegment {
+	std::string text;
+	bool bold = false;
+	bool italic = false;
+};
+
+/// Parse ASS text with override tags into styled segments
+/// @param text ASS dialogue text with override tags like {\b1}bold{\b0}
+/// @param defaultBold Default bold state from style
+/// @param defaultItalic Default italic state from style
+/// @return Vector of styled segments
+static std::vector<StyledSegment> ParseStyledSegments(const std::string &text, bool defaultBold, bool defaultItalic) {
+	std::vector<StyledSegment> segments;
+
+	bool currentBold = defaultBold;
+	bool currentItalic = defaultItalic;
+	std::string currentText;
+
+	size_t i = 0;
+	while (i < text.length()) {
+		// Check for override tag block
+		if (text[i] == '{') {
+			// Save current segment if it has text
+			if (!currentText.empty()) {
+				segments.push_back({currentText, currentBold, currentItalic});
+				currentText.clear();
+			}
+
+			// Find end of tag block
+			size_t tagEnd = text.find('}', i);
+			if (tagEnd == std::string::npos) {
+				// Malformed - no closing brace, skip
+				++i;
+				continue;
+			}
+
+			// Parse tags within the block
+			std::string tagBlock = text.substr(i + 1, tagEnd - i - 1);
+
+			// Look for \b0 or \b1
+			size_t bpos = 0;
+			while ((bpos = tagBlock.find("\\b", bpos)) != std::string::npos) {
+				if (bpos + 2 < tagBlock.length()) {
+					char next = tagBlock[bpos + 2];
+					if (next == '0') {
+						currentBold = false;
+					} else if (next == '1') {
+						currentBold = true;
+					}
+				}
+				bpos += 2;
+			}
+
+			// Look for \i0 or \i1
+			size_t ipos = 0;
+			while ((ipos = tagBlock.find("\\i", ipos)) != std::string::npos) {
+				if (ipos + 2 < tagBlock.length()) {
+					char next = tagBlock[ipos + 2];
+					if (next == '0') {
+						currentItalic = false;
+					} else if (next == '1') {
+						currentItalic = true;
+					}
+				}
+				ipos += 2;
+			}
+
+			i = tagEnd + 1;
+		} else {
+			currentText += text[i];
+			++i;
+		}
+	}
+
+	// Add final segment
+	if (!currentText.empty()) {
+		segments.push_back({currentText, currentBold, currentItalic});
+	}
+
+	return segments;
+}
+
+/// Convert CineCanvas RRGGBBAA color string to agi::Color
+/// @param colorStr 8-character hex string (RRGGBBAA)
+/// @param outAlpha Optional pointer to receive alpha value in ASS format
+/// @return agi::Color with RGB values
+static agi::Color ParseCineCanvasColor(const std::string &colorStr, uint8_t *outAlpha = nullptr) {
+	if (colorStr.length() < 6) {
+		if (outAlpha) *outAlpha = 0;  // Fully opaque in ASS terms
+		return agi::Color(255, 255, 255);  // Default white
+	}
+
+	try {
+		int r = std::stoi(colorStr.substr(0, 2), nullptr, 16);
+		int g = std::stoi(colorStr.substr(2, 2), nullptr, 16);
+		int b = std::stoi(colorStr.substr(4, 2), nullptr, 16);
+
+		if (outAlpha && colorStr.length() >= 8) {
+			// CineCanvas alpha: FF = opaque, 00 = transparent
+			// ASS alpha: 00 = opaque, FF = transparent
+			int cinema_alpha = std::stoi(colorStr.substr(6, 2), nullptr, 16);
+			*outAlpha = static_cast<uint8_t>(255 - cinema_alpha);
+		} else if (outAlpha) {
+			*outAlpha = 0;  // Fully opaque in ASS terms
+		}
+
+		return agi::Color(r, g, b);
+	} catch (...) {
+		if (outAlpha) *outAlpha = 0;
+		return agi::Color(255, 255, 255);
+	}
+}
+
+/// Parse font properties from a CineCanvas Font XML node
+/// @param fontNode The Font XML node
+/// @return CineCanvasFontProps filled with parsed values
+static CineCanvasFontProps ParseFontNode(wxXmlNode *fontNode) {
+	CineCanvasFontProps props;
+
+	if (!fontNode) return props;
+
+	// Parse Size
+	wxString sizeStr = fontNode->GetAttribute("Size", "42");
+	long size = 42;
+	sizeStr.ToLong(&size);
+	props.fontSize = static_cast<int>(size);
+
+	// Parse Weight
+	wxString weightStr = fontNode->GetAttribute("Weight", "normal");
+	props.bold = (weightStr.Lower() == "bold");
+
+	// Parse Italic
+	wxString italicStr = fontNode->GetAttribute("Italic", "no");
+	props.italic = (italicStr.Lower() == "yes");
+
+	// Parse Color (RRGGBBAA)
+	wxString colorStr = fontNode->GetAttribute("Color", "FFFFFFFF");
+	props.primaryColor = ParseCineCanvasColor(from_wx(colorStr), &props.primaryAlpha);
+
+	// Parse Effect and EffectColor
+	wxString effectStr = fontNode->GetAttribute("Effect", "none");
+	if (effectStr.Lower() == "border") {
+		props.outlineWidth = 2.0;
+		wxString effectColorStr = fontNode->GetAttribute("EffectColor", "FF000000");
+		props.outlineColor = ParseCineCanvasColor(from_wx(effectColorStr), &props.outlineAlpha);
+	} else if (effectStr.Lower() == "shadow") {
+		props.outlineWidth = 0.0;
+	} else {
+		props.outlineWidth = 0.0;
+	}
+
+	return props;
+}
+
+/// Extract effective font properties from a dialogue line
+/// @param line The dialogue line
+/// @param style The style assigned to this line (may be nullptr)
+/// @return Effective font properties (style + override tags)
+static CineCanvasFontProps GetEffectiveFontProps(const AssDialogue *line, const AssStyle *style) {
+	CineCanvasFontProps props;
+
+	// Start with style properties (or defaults if no style)
+	if (style) {
+		props.fontName = style->font;
+		props.fontSize = static_cast<int>(style->fontsize);
+		props.bold = style->bold;
+		props.italic = style->italic;
+		props.primaryColor = style->primary;
+		props.outlineColor = style->outline;
+		props.outlineWidth = style->outline_w;
+	}
+
+	// Parse override tags from the text for font name, size, color (not bold/italic)
+	// Bold and italic are handled per-segment in WriteSubtitle using ParseStyledSegments
+	std::string text = line->Text.get();
+
+	// Variables for regex parsing
+	std::smatch match;
+	std::string::const_iterator searchStart;
+
+	// Parse \fn (font name): \fnArial
+	std::regex fontNameRegex(R"(\\fn([^\\}]+))");
+	searchStart = text.cbegin();
+	while (std::regex_search(searchStart, text.cend(), match, fontNameRegex)) {
+		props.fontName = match[1].str();
+		searchStart = match.suffix().first;
+	}
+
+	// Parse \fs (font size): \fs42
+	std::regex fontSizeRegex(R"(\\fs(\d+))");
+	searchStart = text.cbegin();
+	while (std::regex_search(searchStart, text.cend(), match, fontSizeRegex)) {
+		props.fontSize = std::stoi(match[1].str());
+		searchStart = match.suffix().first;
+	}
+
+	// Parse \1c (primary color): \1c&HFFFFFF& or \c&HFFFFFF&
+	// ASS color format: &HBBGGRR& (BGR order)
+	std::regex colorRegex(R"(\\1?c&H([0-9A-Fa-f]{6})&?)");
+	searchStart = text.cbegin();
+	while (std::regex_search(searchStart, text.cend(), match, colorRegex)) {
+		std::string hex = match[1].str();
+		// Parse BGR
+		int b = std::stoi(hex.substr(0, 2), nullptr, 16);
+		int g = std::stoi(hex.substr(2, 2), nullptr, 16);
+		int r = std::stoi(hex.substr(4, 2), nullptr, 16);
+		props.primaryColor = agi::Color(r, g, b);
+		searchStart = match.suffix().first;
+	}
+
+	// Parse \3c (outline color): \3c&H000000&
+	std::regex outlineColorRegex(R"(\\3c&H([0-9A-Fa-f]{6})&?)");
+	searchStart = text.cbegin();
+	while (std::regex_search(searchStart, text.cend(), match, outlineColorRegex)) {
+		std::string hex = match[1].str();
+		int b = std::stoi(hex.substr(0, 2), nullptr, 16);
+		int g = std::stoi(hex.substr(2, 2), nullptr, 16);
+		int r = std::stoi(hex.substr(4, 2), nullptr, 16);
+		props.outlineColor = agi::Color(r, g, b);
+		searchStart = match.suffix().first;
+	}
+
+	// Parse \1a (primary alpha): \1a&HFF&
+	std::regex alphaRegex(R"(\\1?a&H([0-9A-Fa-f]{2})&?)");
+	searchStart = text.cbegin();
+	while (std::regex_search(searchStart, text.cend(), match, alphaRegex)) {
+		props.primaryAlpha = std::stoi(match[1].str(), nullptr, 16);
+		searchStart = match.suffix().first;
+	}
+
+	return props;
+}
 
 CineCanvasSubtitleFormat::CineCanvasSubtitleFormat()
 : SubtitleFormat("CineCanvas XML")
@@ -90,7 +338,7 @@ bool CineCanvasSubtitleFormat::CanSave(const AssFile *file) const {
 
 void CineCanvasSubtitleFormat::ReadFile(AssFile *target, agi::fs::path const& filename,
                                         agi::vfr::Framerate const& fps, const char *encoding) const {
-	// Load default ASS structure (uses Default style)
+	// Load default ASS structure
 	target->LoadDefault(false);
 
 	// Load and validate XML
@@ -102,62 +350,175 @@ void CineCanvasSubtitleFormat::ReadFile(AssFile *target, agi::fs::path const& fi
 	if (!root || root->GetName() != "DCSubtitle")
 		throw CineCanvasParseError("Invalid CineCanvas file: missing DCSubtitle root element");
 
-	// Find Font node(s) containing Subtitle elements
+	// Parse metadata from root element children
+	std::string movieTitle;
+	std::string language;
+	wxXmlNode *containerFontNode = nullptr;
+
 	for (wxXmlNode *child = root->GetChildren(); child; child = child->GetNext()) {
-		if (child->GetName() == "Font") {
-			// Iterate through Subtitle elements within Font node
-			for (wxXmlNode *subNode = child->GetChildren(); subNode; subNode = subNode->GetNext()) {
-				if (subNode->GetName() == "Subtitle") {
-					// Parse TimeIn and TimeOut attributes
-					wxString timeInStr = subNode->GetAttribute("TimeIn", "00:00:00:000");
-					wxString timeOutStr = subNode->GetAttribute("TimeOut", "00:00:05:000");
+		wxString nodeName = child->GetName();
+		if (nodeName == "MovieTitle") {
+			movieTitle = from_wx(child->GetNodeContent());
+		} else if (nodeName == "Language") {
+			language = from_wx(child->GetNodeContent());
+		} else if (nodeName == "Font") {
+			// Remember the first/main Font container node
+			if (!containerFontNode) {
+				containerFontNode = child;
+			}
+		}
+	}
 
-					agi::Time timeIn = ConvertTimeFromCineCanvas(from_wx(timeInStr));
-					agi::Time timeOut = ConvertTimeFromCineCanvas(from_wx(timeOutStr));
+	// Store metadata in ASS script info
+	if (!movieTitle.empty()) {
+		target->SetScriptInfo("Title", movieTitle);
+	}
+	if (!language.empty()) {
+		// Store language in a custom field (ASS doesn't have a standard language field)
+		target->SetScriptInfo("Language", language);
+	}
 
-					// Collect all Text elements with their VPosition for proper ordering
-					struct TextLine {
-						double vpos;
-						std::string text;
-					};
-					std::vector<TextLine> textLines;
+	// Parse font properties from container Font node and create a CineCanvas style
+	CineCanvasFontProps containerFontProps;
+	if (containerFontNode) {
+		containerFontProps = ParseFontNode(containerFontNode);
+	}
 
+	// Create or update the "CineCanvas" style with parsed font properties
+	// First, remove the Default style that was created by LoadDefault
+	for (auto it = target->Styles.begin(); it != target->Styles.end(); ) {
+		if (it->name == "Default") {
+			it = target->Styles.erase(it);
+		} else {
+			++it;
+		}
+	}
+
+	// Create the CineCanvas style
+	auto *style = new AssStyle();
+	style->name = "CineCanvas";
+	style->font = containerFontProps.fontName;
+	style->fontsize = containerFontProps.fontSize;
+	style->bold = containerFontProps.bold;
+	style->italic = containerFontProps.italic;
+	style->primary = containerFontProps.primaryColor;
+	style->outline = containerFontProps.outlineColor;
+	style->outline_w = containerFontProps.outlineWidth;
+	style->alignment = 2;  // Bottom center (default for subtitles)
+	style->Margin = {10, 10, 10};  // Default margins
+	style->UpdateData();
+	target->Styles.push_back(*style);
+
+	// Process all Font nodes to find Subtitle elements
+	for (wxXmlNode *fontChild = root->GetChildren(); fontChild; fontChild = fontChild->GetNext()) {
+		if (fontChild->GetName() != "Font") continue;
+
+		// Parse this Font node's properties (may differ from container)
+		CineCanvasFontProps fontProps = ParseFontNode(fontChild);
+
+		// Iterate through children - could be Subtitle elements or nested Font elements
+		for (wxXmlNode *subNode = fontChild->GetChildren(); subNode; subNode = subNode->GetNext()) {
+			if (subNode->GetName() == "Subtitle") {
+				// Parse TimeIn and TimeOut attributes
+				wxString timeInStr = subNode->GetAttribute("TimeIn", "00:00:00:000");
+				wxString timeOutStr = subNode->GetAttribute("TimeOut", "00:00:05:000");
+
+				agi::Time timeIn = ConvertTimeFromCineCanvas(from_wx(timeInStr));
+				agi::Time timeOut = ConvertTimeFromCineCanvas(from_wx(timeOutStr));
+
+				// Parse FadeUpTime and FadeDownTime
+				wxString fadeUpStr = subNode->GetAttribute("FadeUpTime", "0");
+				wxString fadeDownStr = subNode->GetAttribute("FadeDownTime", "0");
+				long fadeUp = 0, fadeDown = 0;
+				fadeUpStr.ToLong(&fadeUp);
+				fadeDownStr.ToLong(&fadeDown);
+
+				// Look for nested Font element inside Subtitle (for inline font overrides)
+				wxXmlNode *inlineFontNode = nullptr;
+				for (wxXmlNode *subChild = subNode->GetChildren(); subChild; subChild = subChild->GetNext()) {
+					if (subChild->GetName() == "Font") {
+						inlineFontNode = subChild;
+						break;
+					}
+				}
+
+				// Determine which node contains Text elements
+				wxXmlNode *textContainer = inlineFontNode ? inlineFontNode : subNode;
+
+				// Collect all Text elements with their VPosition for proper ordering
+				struct TextLine {
+					double vpos;
+					std::string text;
+					std::string valign;
+					std::string halign;
+				};
+				std::vector<TextLine> textLines;
+
+				for (wxXmlNode *textNode = textContainer->GetChildren(); textNode; textNode = textNode->GetNext()) {
+					if (textNode->GetName() == "Text") {
+						wxString vposStr = textNode->GetAttribute("VPosition", "10.0");
+						double vpos = 10.0;
+						vposStr.ToDouble(&vpos);
+
+						wxString valign = textNode->GetAttribute("VAlign", "bottom");
+						wxString halign = textNode->GetAttribute("HAlign", "center");
+
+						wxString content = textNode->GetNodeContent();
+						if (!content.IsEmpty()) {
+							textLines.push_back({vpos, from_wx(content), from_wx(valign), from_wx(halign)});
+						}
+					}
+				}
+
+				// Also check for Text directly under Subtitle (without Font wrapper)
+				if (textLines.empty()) {
 					for (wxXmlNode *textNode = subNode->GetChildren(); textNode; textNode = textNode->GetNext()) {
 						if (textNode->GetName() == "Text") {
 							wxString vposStr = textNode->GetAttribute("VPosition", "10.0");
 							double vpos = 10.0;
 							vposStr.ToDouble(&vpos);
 
+							wxString valign = textNode->GetAttribute("VAlign", "bottom");
+							wxString halign = textNode->GetAttribute("HAlign", "center");
+
 							wxString content = textNode->GetNodeContent();
 							if (!content.IsEmpty()) {
-								textLines.push_back({vpos, from_wx(content)});
+								textLines.push_back({vpos, from_wx(content), from_wx(valign), from_wx(halign)});
 							}
 						}
 					}
-
-					// Sort by VPosition descending (higher position = earlier/top line)
-					std::sort(textLines.begin(), textLines.end(),
-						[](const TextLine &a, const TextLine &b) { return a.vpos > b.vpos; });
-
-					// Join text lines with \N
-					std::string combinedText;
-					for (size_t i = 0; i < textLines.size(); ++i) {
-						if (i > 0) combinedText += "\\N";
-						combinedText += textLines[i].text;
-					}
-
-					// Skip empty subtitles
-					if (combinedText.empty()) continue;
-
-					// Create AssDialogue with Default style
-					auto diag = new AssDialogue;
-					diag->Start = timeIn;
-					diag->End = timeOut;
-					diag->Text = combinedText;
-					diag->Style = "Default";
-
-					target->Events.push_back(*diag);
 				}
+
+				// Sort by VPosition descending (higher position = earlier/top line)
+				std::sort(textLines.begin(), textLines.end(),
+					[](const TextLine &a, const TextLine &b) { return a.vpos > b.vpos; });
+
+				// Join text lines with \N
+				std::string combinedText;
+				for (size_t i = 0; i < textLines.size(); ++i) {
+					if (i > 0) combinedText += "\\N";
+					combinedText += textLines[i].text;
+				}
+
+				// Skip empty subtitles
+				if (combinedText.empty()) continue;
+
+				// Prepend fade tag if fades are specified
+				std::string finalText;
+				if (fadeUp > 0 || fadeDown > 0) {
+					finalText = "{\\fad(" + std::to_string(fadeUp) + "," + std::to_string(fadeDown) + ")}" + combinedText;
+				} else {
+					finalText = combinedText;
+				}
+
+				// Create AssDialogue with CineCanvas style
+				auto *diag = new AssDialogue;
+				diag->Start = timeIn;
+				diag->End = timeOut;
+				diag->Text = finalText;
+				diag->Style = "CineCanvas";
+
+				target->Events.push_back(*diag);
 			}
 		}
 	}
@@ -169,13 +530,11 @@ void CineCanvasSubtitleFormat::ReadFile(AssFile *target, agi::fs::path const& fi
 
 void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const& filename,
                                          agi::vfr::Framerate const& fps, const char *encoding) const {
-	// Load export settings from preferences
-	CineCanvasExportSettings settings("Subtitle Format/CineCanvas");
+	// Initialize export settings from filename and video framerate
+	CineCanvasExportSettings settings(filename, fps);
 
-	// Use the framerate from settings if provided, otherwise use the passed fps
+	// Get the export framerate from settings (which may have been auto-detected or will be user-selected)
 	agi::vfr::Framerate export_fps = settings.GetFramerate();
-	if (!export_fps.IsLoaded() && fps.IsLoaded())
-		export_fps = fps;
 
 	// Convert to CineCanvas-compatible format
 	AssFile copy(*src);
@@ -190,33 +549,34 @@ void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const
 	// Write header (metadata and font definitions)
 	WriteHeader(root, src, settings);
 
-	// Get the default style from the ASS file to use for export
-	// This ensures we export what the user sees in the preview
-	const AssStyle *defaultStyle = nullptr;
+	// Build style lookup map
+	std::map<std::string, const AssStyle*> styleMap;
 	for (auto const& style : src->Styles) {
-		if (style.name == "Default") {
-			defaultStyle = &style;
-			break;
-		}
+		styleMap[style.name] = &style;
 	}
-	if (!defaultStyle && !src->Styles.empty()) {
-		// If no "Default" style, use the first available style
+
+	// Get default style for container Font node
+	const AssStyle *defaultStyle = nullptr;
+	auto it = styleMap.find("Default");
+	if (it != styleMap.end()) {
+		defaultStyle = it->second;
+	} else if (!src->Styles.empty()) {
 		defaultStyle = &src->Styles.front();
 	}
 
-	// Create Font container node using ASS file style properties
+	// Create container Font node with default/fallback properties
+	// Per-line differences will use inline Font elements
 	wxXmlNode *fontNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Font");
 	fontNode->AddAttribute("Id", "Font1");
 
+	// Set container defaults (will be overridden per-line as needed)
 	if (defaultStyle) {
-		// Use actual style properties from the ASS file
+		fontNode->AddAttribute("Script", to_wx(defaultStyle->font));  // Font family name
 		fontNode->AddAttribute("Size", wxString::Format("%d", static_cast<int>(defaultStyle->fontsize)));
 		fontNode->AddAttribute("Weight", defaultStyle->bold ? "bold" : "normal");
-
-		// Convert colors to CineCanvas format (RRGGBBAA)
+		fontNode->AddAttribute("Italic", defaultStyle->italic ? "yes" : "no");
 		fontNode->AddAttribute("Color", to_wx(ConvertColorToRGBA(defaultStyle->primary, 0)));
 
-		// Use border if outline width > 0, otherwise no effect
 		if (defaultStyle->outline_w > 0) {
 			fontNode->AddAttribute("Effect", "border");
 			fontNode->AddAttribute("EffectColor", to_wx(ConvertColorToRGBA(defaultStyle->outline, 0)));
@@ -225,9 +585,10 @@ void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const
 			fontNode->AddAttribute("EffectColor", "FF000000");
 		}
 	} else {
-		// Fallback to defaults if no style found
+		fontNode->AddAttribute("Script", "Arial");  // Default font family
 		fontNode->AddAttribute("Size", "42");
 		fontNode->AddAttribute("Weight", "normal");
+		fontNode->AddAttribute("Italic", "no");
 		fontNode->AddAttribute("Color", "FFFFFFFF");
 		fontNode->AddAttribute("Effect", "border");
 		fontNode->AddAttribute("EffectColor", "FF000000");
@@ -235,11 +596,19 @@ void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const
 
 	root->AddChild(fontNode);
 
-	// Write subtitle entries
+	// Write subtitle entries with per-line style lookup
 	int spotNumber = 1;
 	for (auto const& line : copy.Events) {
 		if (!line.Comment) {
-			WriteSubtitle(fontNode, &line, spotNumber++, export_fps, settings);
+			// Look up the style for this line
+			const AssStyle *lineStyle = nullptr;
+			auto styleIt = styleMap.find(line.Style.get());
+			if (styleIt != styleMap.end()) {
+				lineStyle = styleIt->second;
+			} else {
+				lineStyle = defaultStyle;  // Fall back to default
+			}
+			WriteSubtitle(fontNode, &line, lineStyle, spotNumber++, export_fps, settings);
 		}
 	}
 
@@ -253,7 +622,8 @@ void CineCanvasSubtitleFormat::ConvertToCineCanvas(AssFile &file) const {
 	StripComments(file);
 	RecombineOverlaps(file);
 	MergeIdentical(file);
-	StripTags(file);
+	// Note: We do NOT call StripTags here - tags are preserved so WriteSubtitle
+	// can extract \fad fade times from each line before stripping
 	// Note: We preserve \N line breaks - they will be handled in WriteSubtitle
 	// by creating separate <Text> elements with different VPosition values
 }
@@ -293,8 +663,12 @@ void CineCanvasSubtitleFormat::WriteHeader(wxXmlNode *root, const AssFile *src, 
 }
 
 void CineCanvasSubtitleFormat::WriteSubtitle(wxXmlNode *fontNode, const AssDialogue *line,
-                                             int spotNumber, const agi::vfr::Framerate &fps,
+                                             const AssStyle *style, int spotNumber,
+                                             const agi::vfr::Framerate &fps,
                                              const CineCanvasExportSettings &settings) const {
+	// Get effective font properties (style + override tags)
+	CineCanvasFontProps fontProps = GetEffectiveFontProps(line, style);
+
 	// Create Subtitle element
 	wxXmlNode *subtitleNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Subtitle");
 	subtitleNode->AddAttribute("SpotNumber", wxString::Format("%d", spotNumber));
@@ -306,77 +680,204 @@ void CineCanvasSubtitleFormat::WriteSubtitle(wxXmlNode *fontNode, const AssDialo
 	subtitleNode->AddAttribute("TimeIn", to_wx(timeIn));
 	subtitleNode->AddAttribute("TimeOut", to_wx(timeOut));
 
-	// Use fade duration from settings
-	subtitleNode->AddAttribute("FadeUpTime", wxString::Format("%d", settings.fade_duration));
-	subtitleNode->AddAttribute("FadeDownTime", wxString::Format("%d", settings.fade_duration));
+	// Extract fade times from ASS \fad tags (must be done before stripping tags)
+	int fadeIn = GetFadeTime(line, true);
+	int fadeOut = GetFadeTime(line, false);
+	subtitleNode->AddAttribute("FadeUpTime", wxString::Format("%d", fadeIn));
+	subtitleNode->AddAttribute("FadeDownTime", wxString::Format("%d", fadeOut));
 
 	fontNode->AddChild(subtitleNode);
 
-	// Split text by \N (ASS line break marker) to create separate Text elements
-	std::string text = line->Text.get();
-	std::vector<std::string> lines;
+	// Get the raw text with override tags
+	std::string rawText = line->Text.get();
 
-	// Split on \N (case-insensitive: both \N and \n are used in ASS)
+	// Get default bold/italic from style
+	bool defaultBold = style ? style->bold : false;
+	bool defaultItalic = style ? style->italic : false;
+
+	// Split raw text on \N (preserving override tags)
+	std::vector<std::string> rawLines;
 	size_t pos = 0;
 	size_t prev = 0;
-	while ((pos = text.find("\\N", prev)) != std::string::npos) {
-		lines.push_back(text.substr(prev, pos - prev));
+	while ((pos = rawText.find("\\N", prev)) != std::string::npos) {
+		rawLines.push_back(rawText.substr(prev, pos - prev));
 		prev = pos + 2;
 	}
 	// Also check for lowercase \n
-	if (lines.empty()) {
+	if (rawLines.empty()) {
 		prev = 0;
-		while ((pos = text.find("\\n", prev)) != std::string::npos) {
-			lines.push_back(text.substr(prev, pos - prev));
+		while ((pos = rawText.find("\\n", prev)) != std::string::npos) {
+			rawLines.push_back(rawText.substr(prev, pos - prev));
 			prev = pos + 2;
 		}
 	}
-	lines.push_back(text.substr(prev));
+	rawLines.push_back(rawText.substr(prev));
 
-	// Remove empty lines and trim whitespace
-	std::vector<std::string> cleanedLines;
-	for (const auto& l : lines) {
-		std::string trimmed = l;
-		// Trim leading/trailing whitespace
-		size_t start = trimmed.find_first_not_of(" \t");
+	// Base VPosition for bottom line, and line spacing
+	const double baseVPosition = 10.0;
+	const double lineSpacing = 6.5;
+
+	// Process each line
+	int numLines = static_cast<int>(rawLines.size());
+	int validLineIndex = 0;
+
+	// First pass: count non-empty lines for positioning
+	int nonEmptyLines = 0;
+	for (const auto& rawLine : rawLines) {
+		auto segments = ParseStyledSegments(rawLine, defaultBold, defaultItalic);
+		std::string lineText;
+		for (const auto& seg : segments) {
+			lineText += seg.text;
+		}
+		// Trim whitespace
+		size_t start = lineText.find_first_not_of(" \t");
 		if (start != std::string::npos) {
-			size_t end = trimmed.find_last_not_of(" \t");
-			trimmed = trimmed.substr(start, end - start + 1);
-			if (!trimmed.empty()) {
-				cleanedLines.push_back(trimmed);
+			nonEmptyLines++;
+		}
+	}
+
+	if (nonEmptyLines == 0) nonEmptyLines = 1;
+
+	// Second pass: create XML elements
+	for (int lineIdx = 0; lineIdx < numLines; ++lineIdx) {
+		const std::string& rawLine = rawLines[lineIdx];
+
+		// Parse this line into styled segments
+		auto segments = ParseStyledSegments(rawLine, defaultBold, defaultItalic);
+
+		// Combine segment texts to check if line is empty
+		std::string lineText;
+		for (const auto& seg : segments) {
+			lineText += seg.text;
+		}
+
+		// Trim whitespace
+		size_t start = lineText.find_first_not_of(" \t");
+		if (start == std::string::npos) {
+			continue;  // Skip empty lines
+		}
+		size_t end = lineText.find_last_not_of(" \t");
+		lineText = lineText.substr(start, end - start + 1);
+
+		// Check if all segments have the same styling
+		bool allSameStyle = true;
+		bool firstBold = segments.empty() ? defaultBold : segments[0].bold;
+		bool firstItalic = segments.empty() ? defaultItalic : segments[0].italic;
+		for (const auto& seg : segments) {
+			if (seg.bold != firstBold || seg.italic != firstItalic) {
+				allSameStyle = false;
+				break;
+			}
+		}
+
+		// Calculate VPosition for this line
+		double vpos = baseVPosition + (nonEmptyLines - 1 - validLineIndex) * lineSpacing;
+		validLineIndex++;
+
+		if (allSameStyle) {
+			// Simple case: uniform styling for the line
+			// Create Font element with this line's style
+			wxXmlNode *lineFontNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Font");
+			lineFontNode->AddAttribute("Script", to_wx(fontProps.fontName));
+			lineFontNode->AddAttribute("Size", wxString::Format("%d", fontProps.fontSize));
+			lineFontNode->AddAttribute("Weight", firstBold ? "bold" : "normal");
+			lineFontNode->AddAttribute("Italic", firstItalic ? "yes" : "no");
+			lineFontNode->AddAttribute("Color", to_wx(ConvertColorToRGBA(fontProps.primaryColor, fontProps.primaryAlpha)));
+
+			if (fontProps.outlineWidth > 0) {
+				lineFontNode->AddAttribute("Effect", "border");
+				lineFontNode->AddAttribute("EffectColor", to_wx(ConvertColorToRGBA(fontProps.outlineColor, 0)));
+			} else {
+				lineFontNode->AddAttribute("Effect", "none");
+			}
+
+			subtitleNode->AddChild(lineFontNode);
+
+			wxXmlNode *textNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Text");
+			textNode->AddAttribute("VAlign", "bottom");
+			textNode->AddAttribute("HAlign", "center");
+			textNode->AddAttribute("VPosition", wxString::Format("%.1f", vpos));
+			textNode->AddAttribute("HPosition", "0.0");
+			textNode->AddAttribute("Direction", "horizontal");
+
+			lineFontNode->AddChild(textNode);
+			textNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", to_wx(lineText)));
+		} else {
+			// Mixed styling: need inline Font elements for each segment
+			// Create base Font element with default (normal) style
+			wxXmlNode *lineFontNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Font");
+			lineFontNode->AddAttribute("Script", to_wx(fontProps.fontName));
+			lineFontNode->AddAttribute("Size", wxString::Format("%d", fontProps.fontSize));
+			lineFontNode->AddAttribute("Weight", "normal");
+			lineFontNode->AddAttribute("Italic", "no");
+			lineFontNode->AddAttribute("Color", to_wx(ConvertColorToRGBA(fontProps.primaryColor, fontProps.primaryAlpha)));
+
+			if (fontProps.outlineWidth > 0) {
+				lineFontNode->AddAttribute("Effect", "border");
+				lineFontNode->AddAttribute("EffectColor", to_wx(ConvertColorToRGBA(fontProps.outlineColor, 0)));
+			} else {
+				lineFontNode->AddAttribute("Effect", "none");
+			}
+
+			subtitleNode->AddChild(lineFontNode);
+
+			wxXmlNode *textNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Text");
+			textNode->AddAttribute("VAlign", "bottom");
+			textNode->AddAttribute("HAlign", "center");
+			textNode->AddAttribute("VPosition", wxString::Format("%.1f", vpos));
+			textNode->AddAttribute("HPosition", "0.0");
+			textNode->AddAttribute("Direction", "horizontal");
+
+			lineFontNode->AddChild(textNode);
+
+			// Add each segment with appropriate inline Font if styled differently
+			for (const auto& seg : segments) {
+				std::string segText = seg.text;
+				// Trim only leading whitespace from first segment, trailing from last
+				// But preserve internal spacing
+				if (segText.empty()) continue;
+
+				if (seg.bold || seg.italic) {
+					// Need inline Font element for styled text
+					wxXmlNode *inlineFont = new wxXmlNode(wxXML_ELEMENT_NODE, "Font");
+					if (seg.bold) {
+						inlineFont->AddAttribute("Weight", "bold");
+					}
+					if (seg.italic) {
+						inlineFont->AddAttribute("Italic", "yes");
+					}
+					textNode->AddChild(inlineFont);
+					inlineFont->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", to_wx(segText)));
+				} else {
+					// Normal text - just add as text node
+					textNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", to_wx(segText)));
+				}
 			}
 		}
 	}
 
-	// If no valid lines found, use original text
-	if (cleanedLines.empty()) {
-		cleanedLines.push_back(text);
-	}
+	// If no lines were added (empty subtitle), add placeholder
+	if (validLineIndex == 0) {
+		wxXmlNode *lineFontNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Font");
+		lineFontNode->AddAttribute("Script", to_wx(fontProps.fontName));
+		lineFontNode->AddAttribute("Size", wxString::Format("%d", fontProps.fontSize));
+		lineFontNode->AddAttribute("Weight", "normal");
+		lineFontNode->AddAttribute("Italic", "no");
+		lineFontNode->AddAttribute("Color", to_wx(ConvertColorToRGBA(fontProps.primaryColor, fontProps.primaryAlpha)));
+		lineFontNode->AddAttribute("Effect", fontProps.outlineWidth > 0 ? "border" : "none");
+		if (fontProps.outlineWidth > 0) {
+			lineFontNode->AddAttribute("EffectColor", to_wx(ConvertColorToRGBA(fontProps.outlineColor, 0)));
+		}
+		subtitleNode->AddChild(lineFontNode);
 
-	// Base VPosition for bottom line, and line spacing (matching reference XML)
-	const double baseVPosition = 10.0;
-	const double lineSpacing = 6.5;
-
-	// Create Text elements for each line
-	// Lines are ordered top-to-bottom in the ASS text, but we need to position
-	// them with higher VPosition for upper lines
-	int numLines = static_cast<int>(cleanedLines.size());
-	for (int i = 0; i < numLines; ++i) {
 		wxXmlNode *textNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Text");
 		textNode->AddAttribute("VAlign", "bottom");
 		textNode->AddAttribute("HAlign", "center");
-
-		// Calculate VPosition: bottom line gets baseVPosition,
-		// each line above gets progressively higher position
-		// Line order in cleanedLines: [0]=top, [numLines-1]=bottom
-		// So line 0 should have highest VPosition, last line has baseVPosition
-		double vpos = baseVPosition + (numLines - 1 - i) * lineSpacing;
-		textNode->AddAttribute("VPosition", wxString::Format("%.1f", vpos));
+		textNode->AddAttribute("VPosition", wxString::Format("%.1f", baseVPosition));
 		textNode->AddAttribute("HPosition", "0.0");
 		textNode->AddAttribute("Direction", "horizontal");
-
-		subtitleNode->AddChild(textNode);
-		textNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", to_wx(cleanedLines[i])));
+		lineFontNode->AddChild(textNode);
+		textNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", ""));
 	}
 }
 
@@ -443,13 +944,37 @@ std::string CineCanvasSubtitleFormat::ConvertTimeToCineCanvas(const agi::Time &t
 }
 
 int CineCanvasSubtitleFormat::GetFadeTime(const AssDialogue *line, bool isFadeIn) const {
-	// Default fade duration (20ms is DCP standard)
-	// In future phases, this could parse ASS fade overrides (\fad or \fade tags)
-	// and extract actual fade times from the dialogue line
+	// Parse \fad(fadeIn,fadeOut) tag from dialogue text
+	// Returns fade time in milliseconds, or 0 if no fade tag present
+	std::string text = line->Text.get();
 
-	// For now, use 20ms standard
-	// Configuration option will be added in Phase 2.3
-	return 20;
+	// Look for \fad(fadeIn,fadeOut) pattern
+	size_t fadPos = text.find("\\fad(");
+	if (fadPos == std::string::npos) {
+		// Also check for \fade( which is the extended format
+		fadPos = text.find("\\fade(");
+	}
+
+	if (fadPos != std::string::npos) {
+		size_t startParen = text.find('(', fadPos);
+		size_t endParen = text.find(')', startParen);
+
+		if (startParen != std::string::npos && endParen != std::string::npos) {
+			std::string params = text.substr(startParen + 1, endParen - startParen - 1);
+
+			// Parse the fade values - \fad(fadeIn,fadeOut)
+			int fadeIn = 0, fadeOut = 0;
+			if (sscanf(params.c_str(), "%d,%d", &fadeIn, &fadeOut) >= 2) {
+				return isFadeIn ? fadeIn : fadeOut;
+			} else if (sscanf(params.c_str(), "%d", &fadeIn) == 1) {
+				// Single value - use for both
+				return fadeIn;
+			}
+		}
+	}
+
+	// No fade tag found - return 0 (no fade)
+	return 0;
 }
 
 agi::Time CineCanvasSubtitleFormat::ConvertTimeFromCineCanvas(const std::string &timeStr) const {

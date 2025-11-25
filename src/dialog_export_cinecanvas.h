@@ -34,16 +34,15 @@
 #pragma once
 
 #include <libaegisub/vfr.h>
+#include <libaegisub/fs.h>
 #include <string>
 
 class wxWindow;
 class AssFile;
 
 /// User configuration for CineCanvas XML export
+/// All values are derived from the session/file context, not from stored preferences
 class CineCanvasExportSettings {
-	/// Prefix used for saving to/loading from options
-	std::string prefix;
-
 public:
 	/// Frame rate options for DCP subtitles
 	enum FrameRate {
@@ -59,38 +58,30 @@ public:
 	};
 
 	/// Frame rate to use for timing conversion
-	FrameRate frame_rate;
+	FrameRate frame_rate = FPS_24;
 
-	/// Title of the movie/project
+	/// Title of the movie/project (derived from filename)
 	std::string movie_title;
 
-	/// DCP reel number (usually 1-based)
-	int reel_number;
+	/// DCP reel number (usually 1-based) - DCP-specific, user must specify
+	int reel_number = 1;
 
-	/// ISO 639-2 language code (e.g., "en", "fr", "de")
-	std::string language_code;
-
-	/// Default font size in points (typically 42-48 for cinema)
-	int font_size;
-
-	/// Fade duration in milliseconds
-	int fade_duration;
+	/// ISO 639-2 language code (e.g., "en", "fr", "de") - DCP-specific, user must specify
+	std::string language_code = "en";
 
 	/// Include font reference in LoadFont element
-	bool include_font_reference;
+	bool include_font_reference = false;
 
 	/// Font file URI for LoadFont element (if include_font_reference is true)
 	std::string font_uri;
 
-	/// Get the frame rate for the current setting
+	/// Get the agi::vfr::Framerate for the current setting
 	agi::vfr::Framerate GetFramerate() const;
 
-	/// Load saved export settings from options
-	/// @param prefix Option name prefix
-	CineCanvasExportSettings(std::string const& prefix);
-
-	/// Save export settings to options
-	void Save() const;
+	/// Initialize export settings from context
+	/// @param filename The output filename (used to derive movie title)
+	/// @param video_fps Optional framerate from loaded video (if available)
+	CineCanvasExportSettings(agi::fs::path const& filename, agi::vfr::Framerate const& video_fps = agi::vfr::Framerate());
 
 	/// Validate settings and return warnings/errors
 	/// @param file AssFile to check for compatibility issues

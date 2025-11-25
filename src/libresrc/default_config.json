@@ -436,15 +436,6 @@
 		},
 		"TXT": {
 			"Default Style Catalog": "Default"
-		},
-		"CineCanvas": {
-			"Default Frame Rate": 24,
-			"Movie Title": "Untitled",
-			"Reel Number": 1,
-			"Language Code": "en",
-			"Default Font Size": 42,
-			"Fade Duration": 20,
-			"Include Font Reference": false
 		}
 	},
 

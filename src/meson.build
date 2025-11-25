@@ -119,7 +119,6 @@ aegisub_src = files(
     'subs_preview.cpp',
     'subtitle_format.cpp',
     'subtitle_format_ass.cpp',
-    'cinecanvas_config.cpp',
     'subtitle_format_cinecanvas.cpp',
     'subtitle_format_ebu3264.cpp',
     'subtitle_format_encore.cpp',

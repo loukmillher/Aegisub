@@ -58,11 +58,13 @@ class CineCanvasSubtitleFormat final : public SubtitleFormat {
 	/// Write a single subtitle entry
 	/// @param fontNode Parent font node
 	/// @param line Dialogue line to write
+	/// @param style Style assigned to this line (for font properties)
 	/// @param spotNumber Sequential subtitle number
 	/// @param fps Frame rate for timing conversion
 	/// @param settings Export settings
 	void WriteSubtitle(wxXmlNode *fontNode, const AssDialogue *line,
-	                   int spotNumber, const agi::vfr::Framerate &fps,
+	                   const AssStyle *style, int spotNumber,
+	                   const agi::vfr::Framerate &fps,
 	                   const CineCanvasExportSettings &settings) const;
 
 	/// Generate RFC 4122 compliant UUID
