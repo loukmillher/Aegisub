@@ -15,7 +15,7 @@ if [ "${MESON_BUILD_OSX_BUNDLE}" != "TRUE" ]; then
   exit 1
 fi
 
-PKG_DIR="${BUILD_DIR}/Aegisub.app"
+PKG_DIR="${BUILD_DIR}/Aegisub Cinema.app"
 SKEL_DIR="${SRC_DIR}/packages/osx_bundle"
 
 if test -d "${PKG_DIR}"; then

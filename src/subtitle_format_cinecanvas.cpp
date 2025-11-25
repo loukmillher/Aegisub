@@ -47,6 +47,8 @@
 #include <wx/xml/xml.h>
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/classification.hpp>
 #include <boost/format.hpp>
 
 DEFINE_EXCEPTION(CineCanvasParseError, SubtitleFormatParseError);
@@ -164,7 +166,8 @@ void CineCanvasSubtitleFormat::ConvertToCineCanvas(AssFile &file) const {
 	RecombineOverlaps(file);
 	MergeIdentical(file);
 	StripTags(file);
-	ConvertNewlines(file, "\\N", false);
+	// Note: We preserve \N line breaks - they will be handled in WriteSubtitle
+	// by creating separate <Text> elements with different VPosition values
 }
 
 void CineCanvasSubtitleFormat::WriteHeader(wxXmlNode *root, const AssFile *src, const CineCanvasExportSettings &settings) const {
@@ -221,14 +224,72 @@ void CineCanvasSubtitleFormat::WriteSubtitle(wxXmlNode *fontNode, const AssDialo
 
 	fontNode->AddChild(subtitleNode);
 
-	// Create Text element
-	wxXmlNode *textNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Text");
-	textNode->AddAttribute("VAlign", "bottom");
-	textNode->AddAttribute("VPosition", "10.0");
-	subtitleNode->AddChild(textNode);
+	// Split text by \N (ASS line break marker) to create separate Text elements
+	std::string text = line->Text.get();
+	std::vector<std::string> lines;
 
-	// Add text content
-	textNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", to_wx(line->Text)));
+	// Split on \N (case-insensitive: both \N and \n are used in ASS)
+	size_t pos = 0;
+	size_t prev = 0;
+	while ((pos = text.find("\\N", prev)) != std::string::npos) {
+		lines.push_back(text.substr(prev, pos - prev));
+		prev = pos + 2;
+	}
+	// Also check for lowercase \n
+	if (lines.empty()) {
+		prev = 0;
+		while ((pos = text.find("\\n", prev)) != std::string::npos) {
+			lines.push_back(text.substr(prev, pos - prev));
+			prev = pos + 2;
+		}
+	}
+	lines.push_back(text.substr(prev));
+
+	// Remove empty lines and trim whitespace
+	std::vector<std::string> cleanedLines;
+	for (const auto& l : lines) {
+		std::string trimmed = l;
+		// Trim leading/trailing whitespace
+		size_t start = trimmed.find_first_not_of(" \t");
+		if (start != std::string::npos) {
+			size_t end = trimmed.find_last_not_of(" \t");
+			trimmed = trimmed.substr(start, end - start + 1);
+			if (!trimmed.empty()) {
+				cleanedLines.push_back(trimmed);
+			}
+		}
+	}
+
+	// If no valid lines found, use original text
+	if (cleanedLines.empty()) {
+		cleanedLines.push_back(text);
+	}
+
+	// Base VPosition for bottom line, and line spacing (matching reference XML)
+	const double baseVPosition = 10.0;
+	const double lineSpacing = 6.5;
+
+	// Create Text elements for each line
+	// Lines are ordered top-to-bottom in the ASS text, but we need to position
+	// them with higher VPosition for upper lines
+	int numLines = static_cast<int>(cleanedLines.size());
+	for (int i = 0; i < numLines; ++i) {
+		wxXmlNode *textNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Text");
+		textNode->AddAttribute("VAlign", "bottom");
+		textNode->AddAttribute("HAlign", "center");
+
+		// Calculate VPosition: bottom line gets baseVPosition,
+		// each line above gets progressively higher position
+		// Line order in cleanedLines: [0]=top, [numLines-1]=bottom
+		// So line 0 should have highest VPosition, last line has baseVPosition
+		double vpos = baseVPosition + (numLines - 1 - i) * lineSpacing;
+		textNode->AddAttribute("VPosition", wxString::Format("%.1f", vpos));
+		textNode->AddAttribute("HPosition", "0.0");
+		textNode->AddAttribute("Direction", "horizontal");
+
+		subtitleNode->AddChild(textNode);
+		textNode->AddChild(new wxXmlNode(wxXML_TEXT_NODE, "", to_wx(cleanedLines[i])));
+	}
 }
 
 std::string CineCanvasSubtitleFormat::ConvertColorToRGBA(const agi::Color &color, uint8_t alpha) const {

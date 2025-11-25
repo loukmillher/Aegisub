@@ -22,7 +22,7 @@ AEGI_VER="${3}"
 PKG_NAME="Aegisub-${AEGI_VER}"
 PKG_NAME_VOLUME="${PKG_NAME}"
 
-PKG_DIR="${BUILD_DIR}/Aegisub.app"
+PKG_DIR="${BUILD_DIR}/Aegisub Cinema.app"
 DMG_TMP_DIR="${BUILD_DIR}/temp_dmg"
 DMG_PATH="${BUILD_DIR}/${PKG_NAME}.dmg"
 DMG_RW_PATH="${BUILD_DIR}/${PKG_NAME}_rw.dmg"
@@ -67,7 +67,7 @@ echo "Device name: ${DEV_NAME}"
 
 echo
 echo "---- Setting root icon using SetFile ----"
-SetFile -a C "/Volumes/${PKG_NAME_VOLUME}"
+SetFile -a C "/Volumes/${PKG_NAME_VOLUME}" || echo "WARNING: Could not set volume icon (non-fatal)"
 
 echo
 if test -n "${SET_STYLE}"; then
@@ -103,7 +103,7 @@ if test -n "${SET_STYLE}"; then
   exit 0
 else
   echo "---- Installing DS_Store ----"
-  cp -v "${SRC_DIR}/packages/osx_dmg/DS_Store" "/Volumes/${PKG_NAME_VOLUME}/.DS_Store"
+  cp -v "${SRC_DIR}/packages/osx_dmg/DS_Store" "/Volumes/${PKG_NAME_VOLUME}/.DS_Store" || echo "WARNING: Could not copy DS_Store (non-fatal)"
 fi
 
 echo
