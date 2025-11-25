@@ -91,6 +91,17 @@ class CineCanvasSubtitleFormat final : public SubtitleFormat {
 	/// @return Fade duration in milliseconds
 	int GetFadeTime(const AssDialogue *line, bool isFadeIn) const;
 
+	/// Convert CineCanvas time format to ASS time
+	/// @param timeStr Time string in HH:MM:SS:mmm format
+	/// @return agi::Time object (stores milliseconds internally)
+	agi::Time ConvertTimeFromCineCanvas(const std::string &timeStr) const;
+
+	/// Convert CineCanvas VAlign/HAlign to ASS alignment code
+	/// @param vAlign Vertical alignment (top, center, bottom)
+	/// @param hAlign Horizontal alignment (left, center, right)
+	/// @return ASS alignment code (1-9, numpad style)
+	int ConvertAlignmentToASS(const std::string &vAlign, const std::string &hAlign) const;
+
 public:
 	CineCanvasSubtitleFormat();
 
@@ -103,6 +114,9 @@ public:
 
 	std::vector<std::string> GetReadWildcards() const override;
 	std::vector<std::string> GetWriteWildcards() const override;
+
+	/// Check if file is a CineCanvas XML (looks for DCSubtitle root element)
+	bool CanReadFile(agi::fs::path const& filename, const char *encoding) const override;
 
 	void ReadFile(AssFile *target, agi::fs::path const& filename,
 	              agi::vfr::Framerate const& fps, const char *encoding) const override;

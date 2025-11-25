@@ -51,6 +51,8 @@
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/format.hpp>
 
+#include <algorithm>
+
 DEFINE_EXCEPTION(CineCanvasParseError, SubtitleFormatParseError);
 
 CineCanvasSubtitleFormat::CineCanvasSubtitleFormat()
@@ -66,6 +68,20 @@ std::vector<std::string> CineCanvasSubtitleFormat::GetWriteWildcards() const {
 	return {"xml"};
 }
 
+bool CineCanvasSubtitleFormat::CanReadFile(agi::fs::path const& filename, const char *) const {
+	// Check extension first
+	if (!agi::fs::HasExtension(filename, "xml"))
+		return false;
+
+	// Check if the XML has DCSubtitle as root element
+	wxXmlDocument doc;
+	if (!doc.Load(filename.wstring()))
+		return false;
+
+	wxXmlNode *root = doc.GetRoot();
+	return root && root->GetName() == "DCSubtitle";
+}
+
 bool CineCanvasSubtitleFormat::CanSave(const AssFile *file) const {
 	// CineCanvas format supports basic subtitle functionality
 	// More validation will be added in future phases
@@ -74,9 +90,81 @@ bool CineCanvasSubtitleFormat::CanSave(const AssFile *file) const {
 
 void CineCanvasSubtitleFormat::ReadFile(AssFile *target, agi::fs::path const& filename,
                                         agi::vfr::Framerate const& fps, const char *encoding) const {
-	// Import functionality will be implemented in Phase 4.3
-	// For now, throw an exception to indicate it's not yet supported
-	throw CineCanvasParseError("CineCanvas import not yet implemented");
+	// Load default ASS structure (uses Default style)
+	target->LoadDefault(false);
+
+	// Load and validate XML
+	wxXmlDocument doc;
+	if (!doc.Load(filename.wstring()))
+		throw CineCanvasParseError("Failed to load CineCanvas XML file");
+
+	wxXmlNode *root = doc.GetRoot();
+	if (!root || root->GetName() != "DCSubtitle")
+		throw CineCanvasParseError("Invalid CineCanvas file: missing DCSubtitle root element");
+
+	// Find Font node(s) containing Subtitle elements
+	for (wxXmlNode *child = root->GetChildren(); child; child = child->GetNext()) {
+		if (child->GetName() == "Font") {
+			// Iterate through Subtitle elements within Font node
+			for (wxXmlNode *subNode = child->GetChildren(); subNode; subNode = subNode->GetNext()) {
+				if (subNode->GetName() == "Subtitle") {
+					// Parse TimeIn and TimeOut attributes
+					wxString timeInStr = subNode->GetAttribute("TimeIn", "00:00:00:000");
+					wxString timeOutStr = subNode->GetAttribute("TimeOut", "00:00:05:000");
+
+					agi::Time timeIn = ConvertTimeFromCineCanvas(from_wx(timeInStr));
+					agi::Time timeOut = ConvertTimeFromCineCanvas(from_wx(timeOutStr));
+
+					// Collect all Text elements with their VPosition for proper ordering
+					struct TextLine {
+						double vpos;
+						std::string text;
+					};
+					std::vector<TextLine> textLines;
+
+					for (wxXmlNode *textNode = subNode->GetChildren(); textNode; textNode = textNode->GetNext()) {
+						if (textNode->GetName() == "Text") {
+							wxString vposStr = textNode->GetAttribute("VPosition", "10.0");
+							double vpos = 10.0;
+							vposStr.ToDouble(&vpos);
+
+							wxString content = textNode->GetNodeContent();
+							if (!content.IsEmpty()) {
+								textLines.push_back({vpos, from_wx(content)});
+							}
+						}
+					}
+
+					// Sort by VPosition descending (higher position = earlier/top line)
+					std::sort(textLines.begin(), textLines.end(),
+						[](const TextLine &a, const TextLine &b) { return a.vpos > b.vpos; });
+
+					// Join text lines with \N
+					std::string combinedText;
+					for (size_t i = 0; i < textLines.size(); ++i) {
+						if (i > 0) combinedText += "\\N";
+						combinedText += textLines[i].text;
+					}
+
+					// Skip empty subtitles
+					if (combinedText.empty()) continue;
+
+					// Create AssDialogue with Default style
+					auto diag = new AssDialogue;
+					diag->Start = timeIn;
+					diag->End = timeOut;
+					diag->Text = combinedText;
+					diag->Style = "Default";
+
+					target->Events.push_back(*diag);
+				}
+			}
+		}
+	}
+
+	// Ensure file has at least one event
+	if (target->Events.empty())
+		target->Events.push_back(*new AssDialogue);
 }
 
 void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const& filename,
@@ -362,4 +450,49 @@ int CineCanvasSubtitleFormat::GetFadeTime(const AssDialogue *line, bool isFadeIn
 	// For now, use 20ms standard
 	// Configuration option will be added in Phase 2.3
 	return 20;
+}
+
+agi::Time CineCanvasSubtitleFormat::ConvertTimeFromCineCanvas(const std::string &timeStr) const {
+	// Parse CineCanvas time format: HH:MM:SS:mmm (colons throughout)
+	int hours = 0, minutes = 0, seconds = 0, milliseconds = 0;
+
+	// Use sscanf for simple parsing of the format
+	if (sscanf(timeStr.c_str(), "%d:%d:%d:%d", &hours, &minutes, &seconds, &milliseconds) != 4) {
+		// Try alternative format with period for milliseconds (HH:MM:SS.mmm)
+		if (sscanf(timeStr.c_str(), "%d:%d:%d.%d", &hours, &minutes, &seconds, &milliseconds) != 4) {
+			// If parsing fails, return 0
+			return agi::Time(0);
+		}
+	}
+
+	// Convert to total milliseconds
+	int totalMs = hours * 3600000 + minutes * 60000 + seconds * 1000 + milliseconds;
+	return agi::Time(totalMs);
+}
+
+int CineCanvasSubtitleFormat::ConvertAlignmentToASS(const std::string &vAlign, const std::string &hAlign) const {
+	// ASS alignment codes use numpad layout:
+	// 7 8 9  (top)
+	// 4 5 6  (middle)
+	// 1 2 3  (bottom)
+
+	int base = 2; // Default to bottom-center
+
+	// Determine vertical position
+	if (vAlign == "top") {
+		base = 8; // top row
+	} else if (vAlign == "center") {
+		base = 5; // middle row
+	} else {
+		base = 2; // bottom row (default)
+	}
+
+	// Adjust for horizontal alignment
+	if (hAlign == "left") {
+		return base - 1; // 1, 4, or 7
+	} else if (hAlign == "right") {
+		return base + 1; // 3, 6, or 9
+	} else {
+		return base; // center: 2, 5, or 8
+	}
 }
