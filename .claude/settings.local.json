@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm:*)",
+      "Bash(MACOSX_DEPLOYMENT_TARGET=11.0 meson setup:*)",
+      "Bash(meson compile:*)",
+      "Bash(ninja:*)",
+      "Bash(pkg-config:*)",
+      "Bash(build_static/aegisub:*)",
+      "Bash(plutil:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

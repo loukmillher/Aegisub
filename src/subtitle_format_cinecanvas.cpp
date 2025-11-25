@@ -79,15 +79,8 @@ void CineCanvasSubtitleFormat::ReadFile(AssFile *target, agi::fs::path const& fi
 
 void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const& filename,
                                          agi::vfr::Framerate const& fps, const char *encoding) const {
-	// Load export settings and show configuration dialog
+	// Load export settings from preferences
 	CineCanvasExportSettings settings("Subtitle Format/CineCanvas");
-
-	// Show export dialog - if user cancels, abort export
-	if (ShowCineCanvasExportDialog(nullptr, settings, src) != wxID_OK)
-		return;
-
-	// Save user's settings for next time
-	settings.Save();
 
 	// Use the framerate from settings if provided, otherwise use the passed fps
 	agi::vfr::Framerate export_fps = settings.GetFramerate();
@@ -107,14 +100,49 @@ void CineCanvasSubtitleFormat::WriteFile(const AssFile *src, agi::fs::path const
 	// Write header (metadata and font definitions)
 	WriteHeader(root, src, settings);
 
-	// Create Font container node using settings
+	// Get the default style from the ASS file to use for export
+	// This ensures we export what the user sees in the preview
+	const AssStyle *defaultStyle = nullptr;
+	for (auto const& style : src->Styles) {
+		if (style.name == "Default") {
+			defaultStyle = &style;
+			break;
+		}
+	}
+	if (!defaultStyle && !src->Styles.empty()) {
+		// If no "Default" style, use the first available style
+		defaultStyle = &src->Styles.front();
+	}
+
+	// Create Font container node using ASS file style properties
 	wxXmlNode *fontNode = new wxXmlNode(wxXML_ELEMENT_NODE, "Font");
 	fontNode->AddAttribute("Id", "Font1");
-	fontNode->AddAttribute("Size", wxString::Format("%d", settings.font_size));
-	fontNode->AddAttribute("Weight", "normal");
-	fontNode->AddAttribute("Color", "FFFFFFFF");
-	fontNode->AddAttribute("Effect", "border");
-	fontNode->AddAttribute("EffectColor", "FF000000");
+
+	if (defaultStyle) {
+		// Use actual style properties from the ASS file
+		fontNode->AddAttribute("Size", wxString::Format("%d", static_cast<int>(defaultStyle->fontsize)));
+		fontNode->AddAttribute("Weight", defaultStyle->bold ? "bold" : "normal");
+
+		// Convert colors to CineCanvas format (RRGGBBAA)
+		fontNode->AddAttribute("Color", to_wx(ConvertColorToRGBA(defaultStyle->primary, 0)));
+
+		// Use border if outline width > 0, otherwise no effect
+		if (defaultStyle->outline_w > 0) {
+			fontNode->AddAttribute("Effect", "border");
+			fontNode->AddAttribute("EffectColor", to_wx(ConvertColorToRGBA(defaultStyle->outline, 0)));
+		} else {
+			fontNode->AddAttribute("Effect", "none");
+			fontNode->AddAttribute("EffectColor", "FF000000");
+		}
+	} else {
+		// Fallback to defaults if no style found
+		fontNode->AddAttribute("Size", "42");
+		fontNode->AddAttribute("Weight", "normal");
+		fontNode->AddAttribute("Color", "FFFFFFFF");
+		fontNode->AddAttribute("Effect", "border");
+		fontNode->AddAttribute("EffectColor", "FF000000");
+	}
+
 	root->AddChild(fontNode);
 
 	// Write subtitle entries

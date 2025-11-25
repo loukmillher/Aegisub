@@ -87,6 +87,8 @@ deps = []
 if host_machine.system() == 'darwin'
     add_languages('objc', 'objcpp')
     add_project_arguments('-DGL_SILENCE_DEPRECATION', language: 'cpp')
+    # Workaround for Boost GIL with Clang 17+
+    add_project_arguments('-Wno-error=missing-template-arg-list-after-template-kw', language: 'cpp')
     # meson neither supports objcpp_std nor inherits cpp_std https://github.com/mesonbuild/meson/issues/5495
     add_project_arguments('-std=c++20', language: 'objcpp')
 
@@ -100,6 +102,7 @@ if host_machine.system() == 'darwin'
     endif
     message('macOS Deployment Target: ' + deployment_target)
     add_project_arguments('-mmacosx-version-min=' + deployment_target, language: ['c', 'cpp', 'objc', 'objcpp'])
+    add_project_link_arguments('-mmacosx-version-min=' + deployment_target, language: ['c', 'cpp', 'objc', 'objcpp'])
 elif host_machine.system() != 'windows'
     conf.set('WITH_FONTCONFIG', 1)
     deps += dependency('fontconfig')
